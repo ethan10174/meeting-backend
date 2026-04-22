@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meeting Notes</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, sans-serif;
+      background: #f5f5f5;
+      color: #1a1a1a;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 48px 16px;
+    }
+
+    h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 32px; }
+
+    #controls {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    button {
+      padding: 10px 22px;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    #recordBtn  { background: #e53e3e; color: #fff; }
+    #stopBtn    { background: #2d3748; color: #fff; }
+    #uploadBtn  { background: #3182ce; color: #fff; }
+
+    #status {
+      font-size: 0.9rem;
+      color: #555;
+      margin-bottom: 32px;
+      min-height: 1.2em;
+    }
+
+    #results { width: 100%; max-width: 720px; display: flex; flex-direction: column; gap: 20px; }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 20px 24px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.08);
+    }
+
+    .card h2 {
+      font-size: 1rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      color: #555;
+      margin-bottom: 10px;
+    }
+
+    .card p { line-height: 1.6; }
+
+    .card ul { padding-left: 18px; line-height: 1.8; }
+
+    .item-meta { font-size: 0.82rem; color: #888; margin-left: 6px; }
+
+    #spinner {
+      display: none;
+      width: 36px; height: 36px;
+      border: 4px solid #ddd;
+      border-top-color: #3182ce;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      margin: 0 auto;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <h1>Meeting Notes</h1>
+
+  <div id="controls">
+    <button id="recordBtn">Record</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <button id="uploadBtn" disabled>Upload &amp; Analyse</button>
+  </div>
+
+  <p id="status">Press Record to start capturing from your microphone.</p>
+  <div id="spinner"></div>
+
+  <div id="results"></div>
+
+  <script>
+    const recordBtn = document.getElementById('recordBtn');
+    const stopBtn   = document.getElementById('stopBtn');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const status    = document.getElementById('status');
+    const spinner   = document.getElementById('spinner');
+    const results   = document.getElementById('results');
+
+    let mediaRecorder, chunks = [], audioBlob = null;
+
+    recordBtn.addEventListener('click', async () => {
+      chunks = [];
+      audioBlob = null;
+      results.innerHTML = '';
+      uploadBtn.disabled = true;
+
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch {
+        status.textContent = 'Microphone access denied.';
+        return;
+      }
+
+      mediaRecorder = new MediaRecorder(stream);
+      mediaRecorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+      mediaRecorder.onstop = () => {
+        audioBlob = new Blob(chunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+        stream.getTracks().forEach(t => t.stop());
+        uploadBtn.disabled = false;
+        status.textContent = `Recording saved (${(audioBlob.size / 1024).toFixed(1)} KB). Click Upload & Analyse.`;
+      };
+
+      mediaRecorder.start();
+      recordBtn.disabled = true;
+      stopBtn.disabled   = false;
+      status.textContent = 'Recording…';
+    });
+
+    stopBtn.addEventListener('click', () => {
+      mediaRecorder.stop();
+      recordBtn.disabled = false;
+      stopBtn.disabled   = true;
+    });
+
+    uploadBtn.addEventListener('click', async () => {
+      if (!audioBlob) return;
+
+      uploadBtn.disabled = true;
+      recordBtn.disabled = true;
+      spinner.style.display = 'block';
+      status.textContent = 'Transcribing and analysing…';
+      results.innerHTML = '';
+
+      const ext = audioBlob.type.includes('ogg') ? 'ogg'
+                : audioBlob.type.includes('mp4') ? 'mp4'
+                : 'webm';
+      const formData = new FormData();
+      formData.append('file', audioBlob, `recording.${ext}`);
+
+      try {
+        const res = await fetch('/upload', { method: 'POST', body: formData });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: res.statusText }));
+          throw new Error(err.detail || res.statusText);
+        }
+        const data = await res.json();
+        render(data);
+        status.textContent = 'Done.';
+      } catch (err) {
+        status.textContent = `Error: ${err.message}`;
+      } finally {
+        spinner.style.display = 'none';
+        uploadBtn.disabled = false;
+        recordBtn.disabled = false;
+      }
+    });
+
+    function render(data) {
+      results.innerHTML = '';
+
+      if (data.summary) {
+        results.appendChild(card('Summary', `<p>${esc(data.summary)}</p>`));
+      }
+
+      if (data.action_items?.length) {
+        const items = data.action_items.map(a => {
+          const meta = [a.owner, a.due].filter(Boolean).join(' · ');
+          return `<li>${esc(a.task)}${meta ? `<span class="item-meta">(${esc(meta)})</span>` : ''}</li>`;
+        }).join('');
+        results.appendChild(card('Action Items', `<ul>${items}</ul>`));
+      }
+
+      if (data.decisions?.length) {
+        const items = data.decisions.map(d => `<li>${esc(d)}</li>`).join('');
+        results.appendChild(card('Decisions', `<ul>${items}</ul>`));
+      }
+
+      if (data.deadlines?.length) {
+        const items = data.deadlines.map(d => {
+          const meta = [d.date, d.owner].filter(Boolean).join(' · ');
+          return `<li>${esc(d.what)}${meta ? `<span class="item-meta">(${esc(meta)})</span>` : ''}</li>`;
+        }).join('');
+        results.appendChild(card('Deadlines', `<ul>${items}</ul>`));
+      }
+    }
+
+    function card(title, bodyHTML) {
+      const div = document.createElement('div');
+      div.className = 'card';
+      div.innerHTML = `<h2>${title}</h2>${bodyHTML}`;
+      return div;
+    }
+
+    function esc(str) {
+      return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+  </script>
+</body>
+</html>
