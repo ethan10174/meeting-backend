@@ -1,13 +1,18 @@
+import io
 import os
 import json
 from typing import Any, Dict, List, Optional
 
+import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from openai import OpenAI
+from pydub import AudioSegment
+
+CHUNK_MS = 10 * 60 * 1000  # 10 minutes
 
 app = FastAPI()
 app.add_middleware(
@@ -18,7 +23,10 @@ app.add_middleware(
 )
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+client = OpenAI(
+    api_key=os.environ.get("OPENAI_API_KEY"),
+    timeout=httpx.Timeout(300.0, connect=10.0),
+)
 
 class TranscriptIn(BaseModel):
     transcript: str
@@ -41,15 +49,46 @@ class ProcessOut(BaseModel):
     decisions: List[str]
 
 
+def _audio_fmt(filename: str, content_type: str) -> Optional[str]:
+    if filename and "." in filename:
+        ext = filename.rsplit(".", 1)[-1].lower()
+        if ext in {"mp3", "wav", "ogg", "flac", "mp4", "m4a", "webm", "mpeg", "mpga", "aac"}:
+            return ext
+    ct_map = {
+        "audio/mpeg": "mp3", "audio/mp3": "mp3",
+        "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav",
+        "audio/ogg": "ogg", "audio/flac": "flac", "audio/x-flac": "flac",
+        "audio/mp4": "mp4", "audio/m4a": "m4a", "audio/x-m4a": "m4a",
+        "audio/webm": "webm", "video/webm": "webm", "video/mp4": "mp4",
+        "audio/aac": "aac",
+    }
+    return ct_map.get(content_type)
+
+
 def _transcribe_audio(filename: str, audio_bytes: bytes, content_type: str) -> str:
+    fmt = _audio_fmt(filename, content_type)
     try:
-        resp = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=(filename, audio_bytes, content_type),
-        )
+        audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=fmt)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Whisper call failed: {e}")
-    return resp.text
+        raise HTTPException(status_code=400, detail=f"Could not decode audio: {e}")
+
+    chunks = [audio[i : i + CHUNK_MS] for i in range(0, len(audio), CHUNK_MS)]
+
+    parts = []
+    for idx, chunk in enumerate(chunks):
+        buf = io.BytesIO()
+        chunk.export(buf, format="mp3")
+        buf.seek(0)
+        try:
+            resp = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=(f"chunk_{idx}.mp3", buf.read(), "audio/mpeg"),
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Whisper call failed on chunk {idx + 1}: {e}")
+        parts.append(resp.text)
+
+    return " ".join(parts)
 
 
 def _extract_notes(transcript: str) -> dict:
