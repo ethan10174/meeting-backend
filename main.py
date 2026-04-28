@@ -17,7 +17,7 @@ CHUNK_MS = 10 * 60 * 1000  # 10 minutes
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "https://meeting-frontend-ashy.vercel.app"],
+    allow_origins=["http://localhost:3000", "https://meeting-frontend-ashy.vercel.app", "null", "file://"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
