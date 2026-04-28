@@ -1,6 +1,9 @@
-import io
-import os
+import glob
 import json
+import os
+import shutil
+import subprocess
+import tempfile
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -10,9 +13,6 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from openai import OpenAI
-from pydub import AudioSegment
-
-CHUNK_MS = 10 * 60 * 1000  # 10 minutes
 
 app = FastAPI()
 app.add_middleware(
@@ -49,46 +49,45 @@ class ProcessOut(BaseModel):
     decisions: List[str]
 
 
-def _audio_fmt(filename: str, content_type: str) -> Optional[str]:
-    if filename and "." in filename:
-        ext = filename.rsplit(".", 1)[-1].lower()
-        if ext in {"mp3", "wav", "ogg", "flac", "mp4", "m4a", "webm", "mpeg", "mpga", "aac"}:
-            return ext
-    ct_map = {
-        "audio/mpeg": "mp3", "audio/mp3": "mp3",
-        "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav",
-        "audio/ogg": "ogg", "audio/flac": "flac", "audio/x-flac": "flac",
-        "audio/mp4": "mp4", "audio/m4a": "m4a", "audio/x-m4a": "m4a",
-        "audio/webm": "webm", "video/webm": "webm", "video/mp4": "mp4",
-        "audio/aac": "aac",
-    }
-    return ct_map.get(content_type)
-
-
 def _transcribe_audio(filename: str, audio_bytes: bytes, content_type: str) -> str:
-    fmt = _audio_fmt(filename, content_type)
+    suffix = ("." + filename.rsplit(".", 1)[-1].lower()) if filename and "." in filename else ""
+    tmpdir = tempfile.mkdtemp()
     try:
-        audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=fmt)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not decode audio: {e}")
+        input_path = os.path.join(tmpdir, f"input{suffix}")
+        with open(input_path, "wb") as f:
+            f.write(audio_bytes)
 
-    chunks = [audio[i : i + CHUNK_MS] for i in range(0, len(audio), CHUNK_MS)]
+        segment_pattern = os.path.join(tmpdir, "chunk_%03d.mp3")
+        cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-f", "segment", "-segment_time", "600",
+            "-vn", "-acodec", "libmp3lame", "-ab", "128k",
+            segment_pattern,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise HTTPException(status_code=400, detail=f"ffmpeg failed: {result.stderr[-500:]}")
 
-    parts = []
-    for idx, chunk in enumerate(chunks):
-        buf = io.BytesIO()
-        chunk.export(buf, format="mp3")
-        buf.seek(0)
-        try:
-            resp = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=(f"chunk_{idx}.mp3", buf.read(), "audio/mpeg"),
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Whisper call failed on chunk {idx + 1}: {e}")
-        parts.append(resp.text)
+        segment_files = sorted(glob.glob(os.path.join(tmpdir, "chunk_*.mp3")))
+        if not segment_files:
+            raise HTTPException(status_code=400, detail="ffmpeg produced no output segments.")
 
-    return " ".join(parts)
+        parts = []
+        for idx, seg_path in enumerate(segment_files):
+            with open(seg_path, "rb") as f:
+                seg_bytes = f.read()
+            try:
+                resp = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=(os.path.basename(seg_path), seg_bytes, "audio/mpeg"),
+                )
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Whisper call failed on chunk {idx + 1}: {e}")
+            parts.append(resp.text)
+
+        return " ".join(parts)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _extract_notes(transcript: str) -> dict:
