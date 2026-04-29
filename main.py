@@ -109,7 +109,7 @@ def _extract_notes(transcript: str) -> dict:
                         "properties": {
                             "task": {"type": "string"},
                             "owner": {"type": ["string", "null"]},
-                            "due": {"type": ["string", "null"]},
+                            "due": {"type": "string"},
                         },
                         "required": ["task", "owner", "due"],
                     },
@@ -120,7 +120,7 @@ def _extract_notes(transcript: str) -> dict:
                         "type": "object",
                         "additionalProperties": False,
                         "properties": {
-                            "date": {"type": ["string", "null"]},
+                            "date": {"type": "string"},
                             "what": {"type": "string"},
                             "owner": {"type": ["string", "null"]},
                         },
@@ -138,14 +138,27 @@ def _extract_notes(transcript: str) -> dict:
     }
 
     prompt = (
-        "You are a meeting assistant. Extract information from the transcript.\n\n"
-        "Return JSON that matches the schema.\n\n"
-        "Rules:\n"
-        "- summary: 1-3 sentences max.\n"
-        "- action_items: only things someone must DO.\n"
-        "- decisions: include explicit decisions (lines starting with 'Decision:' count).\n"
-        "- deadlines: include any due dates/time-based commitments. If due day like 'Friday', keep it as the string.\n"
-        "- If something is not mentioned, return an empty list for that field.\n\n"
+        "You are a precise meeting note-taker. Extract structured information from the transcript below.\n"
+        "Follow every instruction exactly — the same transcript must always produce the same output.\n\n"
+        "SUMMARY\n"
+        "Write a structured summary covering every major topic discussed in the meeting.\n"
+        "Use one short paragraph per topic. Do not skip or truncate any topic.\n\n"
+        "ACTION ITEMS\n"
+        "Extract every task, follow-up, or commitment mentioned by any speaker.\n"
+        "Include implicit commitments (e.g. 'I'll handle that') as well as explicit ones.\n"
+        "For each action item:\n"
+        "  - task: the specific thing to be done, stated clearly\n"
+        "  - owner: the person responsible, or null if not mentioned\n"
+        "  - due: the due date exactly as stated (e.g. 'Friday', 'end of quarter', 'March 15th'),\n"
+        "         or 'Not specified' if no due date was mentioned — never null or empty\n\n"
+        "DEADLINES\n"
+        "List every date-bound commitment or milestone mentioned.\n"
+        "  - what: what is due\n"
+        "  - owner: who is responsible, or null if not mentioned\n"
+        "  - date: the date exactly as stated, or 'Not specified' if no date was mentioned — never null or empty\n\n"
+        "DECISIONS\n"
+        "List every decision made, one per entry. Include decisions stated explicitly ('We decided...')\n"
+        "and implicit ones (e.g. agreement to proceed with a plan). If none, return an empty array.\n\n"
         f"TRANSCRIPT:\n{transcript}"
     )
 
@@ -153,6 +166,7 @@ def _extract_notes(transcript: str) -> dict:
         resp = client.responses.create(
             model="gpt-4o-mini",
             input=prompt,
+            temperature=0,
             text={
                 "format": {
                     "type": "json_schema",
@@ -171,10 +185,18 @@ def _extract_notes(transcript: str) -> dict:
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail=f"Model returned non-JSON: {raw[:200]}")
 
-    # Auto-create deadlines from action items that include due dates
+    # Ensure due/date fields are never null or empty (guards against model non-compliance)
+    for item in data_out.get("action_items", []):
+        if not item.get("due"):
+            item["due"] = "Not specified"
+    for dl in data_out.get("deadlines", []):
+        if not dl.get("date"):
+            dl["date"] = "Not specified"
+
+    # Auto-create deadlines from action items that have a real due date
     for item in data_out.get("action_items", []):
         due = item.get("due")
-        if due:
+        if due and due != "Not specified":
             data_out.setdefault("deadlines", []).append({
                 "date": due,
                 "what": item.get("task"),
