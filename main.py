@@ -33,8 +33,7 @@ class TranscriptIn(BaseModel):
 
 class ActionItem(BaseModel):
     task: str
-    owner: Optional[str] = None
-    due: Optional[str] = None  # keep strings like "Friday" for now
+    due: str
 
 class Deadline(BaseModel):
     date: Optional[str] = None
@@ -108,10 +107,9 @@ def _extract_notes(transcript: str) -> dict:
                         "additionalProperties": False,
                         "properties": {
                             "task": {"type": "string"},
-                            "owner": {"type": ["string", "null"]},
                             "due": {"type": "string"},
                         },
-                        "required": ["task", "owner", "due"],
+                        "required": ["task", "due"],
                     },
                 },
                 "deadlines": {
@@ -148,7 +146,6 @@ def _extract_notes(transcript: str) -> dict:
         "Include implicit commitments (e.g. 'I'll handle that') as well as explicit ones.\n"
         "For each action item:\n"
         "  - task: the specific thing to be done, stated clearly\n"
-        "  - owner: the person responsible, or null if not mentioned\n"
         "  - due: the due date exactly as stated (e.g. 'Friday', 'end of quarter', 'March 15th'),\n"
         "         or 'Not specified' if no due date was mentioned — never null or empty\n\n"
         "DEADLINES\n"
@@ -200,7 +197,7 @@ def _extract_notes(transcript: str) -> dict:
             data_out.setdefault("deadlines", []).append({
                 "date": due,
                 "what": item.get("task"),
-                "owner": item.get("owner"),
+                "owner": None,
             })
 
     return data_out
