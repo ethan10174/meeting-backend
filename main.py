@@ -42,6 +42,7 @@ class Deadline(BaseModel):
 
 class ProcessOut(BaseModel):
     transcript: Optional[str] = None
+    title: str
     summary: str
     action_items: List[ActionItem]
     deadlines: List[Deadline]
@@ -99,6 +100,7 @@ def _extract_notes(transcript: str) -> dict:
             "type": "object",
             "additionalProperties": False,
             "properties": {
+                "title": {"type": "string"},
                 "summary": {"type": "string"},
                 "action_items": {
                     "type": "array",
@@ -130,7 +132,7 @@ def _extract_notes(transcript: str) -> dict:
                     "items": {"type": "string"},
                 },
             },
-            "required": ["summary", "action_items", "deadlines", "decisions"],
+            "required": ["title", "summary", "action_items", "deadlines", "decisions"],
         },
         "strict": True,
     }
@@ -138,6 +140,10 @@ def _extract_notes(transcript: str) -> dict:
     prompt = (
         "You are a precise meeting note-taker. Extract structured information from the transcript below.\n"
         "Follow every instruction exactly — the same transcript must always produce the same output.\n\n"
+        "TITLE\n"
+        "Write a 2-5 word title that captures the main topic of the meeting.\n"
+        "Examples: 'Q3 Budget Review', 'Engineering Sprint Planning', 'Team Onboarding Call'.\n"
+        "Be specific to the content — do not use generic titles like 'Meeting Summary'.\n\n"
         "SUMMARY\n"
         "Write a structured summary covering every major topic discussed in the meeting.\n"
         "Use one short paragraph per topic. Do not skip or truncate any topic.\n\n"
